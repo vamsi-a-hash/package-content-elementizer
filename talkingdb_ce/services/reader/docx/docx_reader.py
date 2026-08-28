@@ -164,9 +164,12 @@ class DocxReader:
         file_name,
         paginate: bool = True,
         cancel_check: Optional[Callable[[], bool]] = None,
+        *,
+        bake_page_breaks: bool = True,
+        baked_docx_path: Optional[str] = None,
         channel: Optional[str] = None,
-        file_hash: Optional[str] = None,
     ) -> DocumentModel:
+        self.stored_file_hash: Optional[str] = None
         self.io_buffer = io_buffer
         self.doc_uid = DocumentModel.make_uid(io_buffer)
 
@@ -231,9 +234,11 @@ class DocxReader:
         model.build_hierarchy()
 
         if paginate and PAGINATE_DOCX_ENABLED:
-            paginate_docx(
+            self.stored_file_hash = paginate_docx(
                 raw_docx_bytes, model, cancel_check=cancel_check,
-                channel=channel, file_hash=file_hash,
+                bake_page_breaks=bake_page_breaks,
+                baked_docx_path=baked_docx_path,
+                channel=channel,
             )
 
         return model

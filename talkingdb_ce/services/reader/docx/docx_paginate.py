@@ -45,13 +45,21 @@ def paginate_docx(
     docx_bytes: bytes,
     model: DocumentModel,
     cancel_check: Optional[Callable[[], bool]] = None,
+    *,
+    bake_page_breaks: bool = True,
+    baked_docx_path: Optional[str] = None,
     channel: Optional[str] = None,
-    file_hash: Optional[str] = None,
-) -> None:
+) -> Optional[str]:
     """Best-effort DOCX pagination: render to PDF, extract page text, and set elem.page.
 
     Pagination failures are logged and leave page=None. ReadCancelled propagates
     so cancellation is not treated as a pagination failure.
+
+    When ``bake_page_breaks`` is True, explicit page breaks are inserted at
+    LibreOffice's page boundaries. The baked file is written to
+    ``baked_docx_path`` when provided (direct/in-process mode), or uploaded
+    once to MinIO under a content hash derived from the baked bytes when
+    ``channel`` is provided without a local path (remote CE mode).
     """
     try:
         pdf_bytes = _render_to_pdf(
@@ -63,14 +71,26 @@ def paginate_docx(
         raise
     except Exception as exc:
         logger.warning(f"docx pagination skipped: {exc}")
-        return
+        return None
 
-    if channel and file_hash:
-        try:
-            _bake_and_store_page_breaks(
-                docx_bytes, page_texts, channel, file_hash)
-        except Exception as exc:
-            logger.warning(f"docx page-break storage skipped: {exc}")
+    if not bake_page_breaks:
+        return None
+
+    try:
+        paginated_bytes = _add_page_breaks(docx_bytes, page_texts)
+    except Exception as exc:
+        logger.warning(f"docx page-break baking skipped: {exc}")
+        return None
+
+    if baked_docx_path:
+        with open(baked_docx_path, "wb") as fh:
+            fh.write(paginated_bytes)
+        return None
+
+    if channel and file_store.is_configured():
+        return _upload_baked_docx(channel, paginated_bytes)
+
+    return None
 
 
 def _render_to_pdf(
@@ -262,21 +282,19 @@ def _add_page_breaks(docx_bytes: bytes, page_texts: List[str]) -> bytes:
     return out.getvalue()
 
 
-def _bake_and_store_page_breaks(
-    docx_bytes: bytes,
-    page_texts: List[str],
-    channel: str,
-    file_hash: str,
-) -> None:
-    """Insert explicit page breaks at LibreOffice's page boundaries and
-    overwrite the originally-uploaded docx object in MinIO with the result.
-    """
-    if not file_store.is_configured():
-        return
-
-    paginated_bytes = _add_page_breaks(docx_bytes, page_texts)
-
-    with tempfile.NamedTemporaryFile(suffix=".docx") as tmp:
+def _upload_baked_docx(channel: str, paginated_bytes: bytes) -> str:
+    """Upload baked docx once under its content hash; used in remote CE mode."""
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
         tmp.write(paginated_bytes)
         tmp.flush()
-        file_store.overwrite_file(channel, file_hash, tmp.name)
+        tmp_path = tmp.name
+
+    try:
+        final_hash = file_store.compute_sha256(tmp_path)
+        file_store.upload_file(channel, final_hash, tmp_path)
+        return final_hash
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass

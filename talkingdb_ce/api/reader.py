@@ -58,18 +58,21 @@ async def run_parse(
         _, ext = os.path.splitext(file_name)
         file_type = ext.lstrip(".").lower()
 
-        # MinIO coordinates (channel, file_hash) are injected by the ingestion
-        # job so paginate_docx() can bake page breaks and overwrite the stored
-        # original at the same content-addressed key.
-        channel = _meta.get("channel")
-        file_hash = _meta.get("file_hash")
+        bake_page_breaks = _meta.get("bake_page_breaks", True) is not False
+        baked_docx_output_path = _meta.get("baked_docx_output_path")
+        # Remote CE mode: channel without a local output path uploads once from CE.
+        channel = _meta.get("channel") if not baked_docx_output_path else None
+        side_effects: dict = {}
 
         @track()
         def _parse_document():
             return parse_document(
                 io_buffer, file_type, file_name,
                 cancel_check=cancel_check, checkpoint_dir=checkpoint_dir,
-                channel=channel, file_hash=file_hash,
+                bake_page_breaks=bake_page_breaks,
+                baked_docx_path=baked_docx_output_path,
+                channel=channel,
+                side_effects=side_effects,
             )
 
         document = _parse_document()
@@ -79,10 +82,14 @@ async def run_parse(
 
         @track(log_response=True, response_key=file_name)
         def _parsed_document():
-            return {
+            result = {
                 "document": to_json(document),
-                "file_index": file_index.model_dump(mode="json")
+                "file_index": file_index.model_dump(mode="json"),
             }
+            stored_file_hash = side_effects.get("stored_file_hash")
+            if stored_file_hash:
+                result["stored_file_hash"] = stored_file_hash
+            return result
 
         return _parsed_document()
     finally:

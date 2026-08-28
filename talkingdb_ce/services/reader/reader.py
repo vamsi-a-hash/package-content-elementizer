@@ -27,8 +27,11 @@ def parse_document(
     file_name: str,
     cancel_check: Optional[Callable[[], bool]] = None,
     checkpoint_dir: Optional[str] = None,
+    *,
+    bake_page_breaks: bool = True,
+    baked_docx_path: Optional[str] = None,
     channel: Optional[str] = None,
-    file_hash: Optional[str] = None,
+    side_effects: Optional[dict] = None,
 ) -> DocumentModel:
     reader = ReaderFactory.get_reader(file_type)
     if not reader:
@@ -42,8 +45,15 @@ def parse_document(
             cancel_check=cancel_check, checkpoint_dir=checkpoint_dir,
         )
     if (file_type or "").lower() == "docx":
-        return reader.read_document(
+        document = reader.read_document(
             io_buffer, file_name, cancel_check=cancel_check,
-            channel=channel, file_hash=file_hash,
+            bake_page_breaks=bake_page_breaks,
+            baked_docx_path=baked_docx_path,
+            channel=channel,
         )
+        if side_effects is not None:
+            stored_hash = getattr(reader, "stored_file_hash", None)
+            if stored_hash:
+                side_effects["stored_file_hash"] = stored_hash
+        return document
     return reader.read_document(io_buffer, file_name, cancel_check=cancel_check)
