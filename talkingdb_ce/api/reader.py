@@ -58,11 +58,18 @@ async def run_parse(
         _, ext = os.path.splitext(file_name)
         file_type = ext.lstrip(".").lower()
 
+        # MinIO coordinates (channel, file_hash) are injected by the ingestion
+        # job so paginate_docx() can bake page breaks and overwrite the stored
+        # original at the same content-addressed key.
+        channel = _meta.get("channel")
+        file_hash = _meta.get("file_hash")
+
         @track()
         def _parse_document():
             return parse_document(
                 io_buffer, file_type, file_name,
                 cancel_check=cancel_check, checkpoint_dir=checkpoint_dir,
+                channel=channel, file_hash=file_hash,
             )
 
         document = _parse_document()

@@ -1,3 +1,4 @@
+import io
 import os
 import re
 import subprocess
@@ -5,6 +6,15 @@ import tempfile
 from typing import Callable, List, Optional
 import shutil
 
+from docx import Document
+from docx.oxml import OxmlElement
+from docx.oxml.ns import qn
+from docx.oxml.table import CT_Tbl
+from docx.oxml.text.paragraph import CT_P
+from docx.table import Table
+from docx.text.paragraph import Paragraph
+
+from talkingdb.helpers import file_store
 from talkingdb.logger.console import logger
 from talkingdb.models.document.document import DocumentModel
 
@@ -26,6 +36,7 @@ if PAGINATE_DOCX_ENABLED and shutil.which("soffice") is None:
         "Either install libreoffice-writer or set CE_DOCX_PAGINATE=0."
     )
 
+
 class PaginationError(Exception):
     pass
 
@@ -34,6 +45,8 @@ def paginate_docx(
     docx_bytes: bytes,
     model: DocumentModel,
     cancel_check: Optional[Callable[[], bool]] = None,
+    channel: Optional[str] = None,
+    file_hash: Optional[str] = None,
 ) -> None:
     """Best-effort DOCX pagination: render to PDF, extract page text, and set elem.page.
 
@@ -50,6 +63,14 @@ def paginate_docx(
         raise
     except Exception as exc:
         logger.warning(f"docx pagination skipped: {exc}")
+        return
+
+    if channel and file_hash:
+        try:
+            _bake_and_store_page_breaks(
+                docx_bytes, page_texts, channel, file_hash)
+        except Exception as exc:
+            logger.warning(f"docx page-break storage skipped: {exc}")
 
 
 def _render_to_pdf(
@@ -163,3 +184,99 @@ def _assign_pages(model: DocumentModel, page_texts: List[str]) -> None:
                 f"docx pagination: no anchor match for element "
                 f"{getattr(elem, 'id', None)}; kept page {page_idx + 1}"
             )
+
+
+def _iter_body_blocks(doc: "Document"):
+    for child in doc.element.body.iterchildren():
+        if isinstance(child, CT_P):
+            p = Paragraph(child, doc)
+            yield p.text, child
+        elif isinstance(child, CT_Tbl):
+            t = Table(child, doc)
+            cell_text = " ".join(
+                cell.text for row in t.rows for cell in row.cells if cell.text
+            )
+            yield cell_text, child
+
+
+def _page_break_targets(doc: "Document", page_texts: List[str]) -> List:
+    norm_pages = [_normalize(t) for t in page_texts]
+    if not norm_pages:
+        return []
+
+    page_idx = 0
+    cursor = 0
+    prev_page = 0
+    seen_first = False
+    targets = []
+
+    for text, elem in _iter_body_blocks(doc):
+        norm = _normalize(text)
+        if not norm:
+            continue  # no anchor to match on; leave cursor where it is
+
+        anchor = norm[:_ANCHOR_LEN] if len(norm) >= _MIN_ANCHOR_LEN else norm
+
+        search_idx = page_idx
+        while search_idx < len(norm_pages):
+            haystack = norm_pages[search_idx]
+            start = cursor if search_idx == page_idx else 0
+            pos = haystack.find(anchor, start)
+            if pos != -1:
+                page_idx = search_idx
+                cursor = pos + len(anchor)
+                break
+            search_idx += 1
+        # no match anywhere ahead -> best effort, keep current page/cursor
+
+        if seen_first and page_idx > prev_page:
+            targets.append(elem)
+        prev_page = page_idx
+        seen_first = True
+
+    return targets
+
+
+def _insert_page_break_before(ct_element) -> None:
+    """Insert a new paragraph containing a hard page. Operating at the oxml level - rather
+    than python-docx's Paragraph.
+    """
+    new_p = OxmlElement("w:p")
+    run = OxmlElement("w:r")
+    br = OxmlElement("w:br")
+    br.set(qn("w:type"), "page")
+    run.append(br)
+    new_p.append(run)
+    ct_element.addprevious(new_p)
+
+
+def _add_page_breaks(docx_bytes: bytes, page_texts: List[str]) -> bytes:
+    doc = Document(io.BytesIO(docx_bytes))
+    targets = _page_break_targets(doc, page_texts)
+
+    for elem in targets:
+        _insert_page_break_before(elem)
+
+    out = io.BytesIO()
+    doc.save(out)
+    return out.getvalue()
+
+
+def _bake_and_store_page_breaks(
+    docx_bytes: bytes,
+    page_texts: List[str],
+    channel: str,
+    file_hash: str,
+) -> None:
+    """Insert explicit page breaks at LibreOffice's page boundaries and
+    overwrite the originally-uploaded docx object in MinIO with the result.
+    """
+    if not file_store.is_configured():
+        return
+
+    paginated_bytes = _add_page_breaks(docx_bytes, page_texts)
+
+    with tempfile.NamedTemporaryFile(suffix=".docx") as tmp:
+        tmp.write(paginated_bytes)
+        tmp.flush()
+        file_store.overwrite_file(channel, file_hash, tmp.name)

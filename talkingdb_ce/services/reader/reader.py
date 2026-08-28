@@ -27,6 +27,8 @@ def parse_document(
     file_name: str,
     cancel_check: Optional[Callable[[], bool]] = None,
     checkpoint_dir: Optional[str] = None,
+    channel: Optional[str] = None,
+    file_hash: Optional[str] = None,
 ) -> DocumentModel:
     reader = ReaderFactory.get_reader(file_type)
     if not reader:
@@ -38,5 +40,10 @@ def parse_document(
         return reader.read_document(
             io_buffer, file_name,
             cancel_check=cancel_check, checkpoint_dir=checkpoint_dir,
+        )
+    if (file_type or "").lower() == "docx":
+        return reader.read_document(
+            io_buffer, file_name, cancel_check=cancel_check,
+            channel=channel, file_hash=file_hash,
         )
     return reader.read_document(io_buffer, file_name, cancel_check=cancel_check)
