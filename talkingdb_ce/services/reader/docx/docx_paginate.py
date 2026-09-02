@@ -48,11 +48,11 @@ def paginate_docx(
     cancel_check: Optional[Callable[[], bool]] = None,
     channel: Optional[str] = None,
     file_hash: Optional[str] = None,
-) -> None:
+) -> Optional[str]:
     """Best-effort DOCX pagination: render to PDF, extract page text, and set elem.page.
 
-    Pagination failures are logged and leave page=None. ReadCancelled propagates
-    so cancellation is not treated as a pagination failure.
+    Pagination failures leave page=None. ReadCancelled propagates so
+    cancellation is not treated as a pagination failure.
 
     When `channel` and `file_hash` are given (the MinIO coordinates of the
     docx module-ttt already uploaded at request time), this also bakes
@@ -71,10 +71,12 @@ def paginate_docx(
         raise
     except Exception as exc:
         logger.warning(f"docx pagination skipped: {exc}")
-        return None
+        return f"pagination failed: {exc}"
 
     if channel and file_hash:
-        _bake_and_store_page_breaks(docx_bytes, page_texts, channel, file_hash)
+        return _bake_and_store_page_breaks(docx_bytes, page_texts, channel, file_hash)
+
+    return None
 
 
 def _render_to_pdf(
@@ -267,89 +269,16 @@ def _has_break_immediately_before(elem) -> bool:
     return False
 
 
-_BAKED_DOCVAR_NAME = "CE_DOCX_PAGE_BREAKS_BAKED"
-_BAKED_DOCVAR_VALUE = "1"
-
-
-def _is_page_breaks_baked(doc: "Document") -> bool:
-    """Return True when this DOCX has already had page breaks baked into it.
-
-    The marker lives in w:settings/w:docVars, which python-docx preserves when
-    loading/saving the document. This makes baking idempotent across retries
-    without introducing a separate custom XML part.
-    """
-    settings = doc.settings.element
-    doc_vars = settings.find(qn("w:docVars"))
-    if doc_vars is None:
-        return False
-
-    for doc_var in doc_vars.findall(qn("w:docVar")):
-        if (
-            doc_var.get(qn("w:name")) == _BAKED_DOCVAR_NAME
-            and doc_var.get(qn("w:val")) == _BAKED_DOCVAR_VALUE
-        ):
-            return True
-    return False
-
-
-def _mark_page_breaks_baked(doc: "Document") -> None:
-    """Stamp the document so a later retry will not bake it again."""
-    settings = doc.settings.element
-    doc_vars = settings.find(qn("w:docVars"))
-    if doc_vars is None:
-        doc_vars = OxmlElement("w:docVars")
-        settings.append(doc_vars)
-
-    for doc_var in doc_vars.findall(qn("w:docVar")):
-        if doc_var.get(qn("w:name")) == _BAKED_DOCVAR_NAME:
-            doc_var.set(qn("w:val"), _BAKED_DOCVAR_VALUE)
-            return
-
-    doc_var = OxmlElement("w:docVar")
-    doc_var.set(qn("w:name"), _BAKED_DOCVAR_NAME)
-    doc_var.set(qn("w:val"), _BAKED_DOCVAR_VALUE)
-    doc_vars.append(doc_var)
-
-
-def _append_page_break_to_previous_paragraph(ct_element) -> bool:
-    """Append a page break to the nearest preceding top-level paragraph.
-
-    This avoids creating a new paragraph mark, which can itself occupy space
-    and, for table targets, can turn stacked breaks into a genuinely blank page.
-    Returns True when a preceding paragraph was found and updated.
-    """
+def _append_break_before(ct_element) -> None:
     prev = ct_element.getprevious()
-    while prev is not None:
-        if isinstance(prev, CT_P):
-            run = OxmlElement("w:r")
-            br = OxmlElement("w:br")
-            br.set(qn("w:type"), "page")
-            run.append(br)
-            prev.append(run)
-            return True
-        prev = prev.getprevious()
+    if prev is not None and isinstance(prev, CT_P):
+        run = OxmlElement("w:r")
+        br = OxmlElement("w:br")
+        br.set(qn("w:type"), "page")
+        run.append(br)
+        prev.append(run)
+        return
 
-    return False
-
-
-def _set_page_break_before(ct_p) -> None:
-    """Mark a paragraph with w:pageBreakBefore - a formatting flag, not
-    content. Idempotent (checked before calling) and, unlike inserting a
-    new paragraph, it can't push anything onto an extra page or invalidate
-    page numbers already computed.
-    """
-    pPr = ct_p.find(qn("w:pPr"))
-    if pPr is None:
-        pPr = OxmlElement("w:pPr")
-        ct_p.insert(0, pPr)
-    if pPr.find(qn("w:pageBreakBefore")) is None:
-        pPr.append(OxmlElement("w:pageBreakBefore"))
-
-
-def _insert_page_break_paragraph_before(ct_element) -> None:
-    """Insert a new paragraph containing a hard page break directly before
-    `ct_element` (a CT_P or CT_Tbl), via raw oxml insertion.
-    """
     new_p = OxmlElement("w:p")
     run = OxmlElement("w:r")
     br = OxmlElement("w:br")
@@ -361,12 +290,6 @@ def _insert_page_break_paragraph_before(ct_element) -> None:
 
 def _add_page_breaks(docx_bytes: bytes, page_texts: list[str]) -> bytes:
     doc = Document(io.BytesIO(docx_bytes))
-
-    # Baking must be idempotent. A retry may receive the object that was already
-    # overwritten by a previous successful bake.
-    if _is_page_breaks_baked(doc):
-        return docx_bytes
-
     targets = _page_break_targets(doc, page_texts)
 
     for elem, gap in targets:
@@ -375,26 +298,13 @@ def _add_page_breaks(docx_bytes: bytes, page_texts: list[str]) -> bytes:
         if needed <= 0:
             continue  # LibreOffice's own break already accounts for this boundary
 
-        if isinstance(elem, CT_P) and needed == 1:
-            _set_page_break_before(elem)
-        else:
-            # Tables cannot carry w:pageBreakBefore. Prefer putting the break
-            # at the end of the existing preceding paragraph so we do not add
-            # a new paragraph mark that can consume space on a page.
-            attached = False
-            for _ in range(needed):
-                if not _append_page_break_to_previous_paragraph(elem):
-                    _insert_page_break_paragraph_before(elem)
-                else:
-                    attached = True
-
-            if attached:
-                continue
-
-    # Stamp only the successfully constructed document. If save fails, the
-    # original MinIO object remains untouched and an unbaked document is not
-    # marked as baked.
-    _mark_page_breaks_baked(doc)
+        # Each call re-checks elem.getprevious(), which after the first
+        # iteration is either the original preceding paragraph (now with
+        # one more break run) or a break-only paragraph this loop just
+        # inserted - either way, subsequent breaks attach there too, so a
+        # multi-page gap doesn't pile up extra empty paragraphs.
+        for _ in range(needed):
+            _append_break_before(elem)
 
     out = io.BytesIO()
     doc.save(out)
@@ -415,9 +325,6 @@ def _bake_and_store_page_breaks(
         return
 
     try:
-        # _add_page_breaks performs the authoritative idempotency check. Keeping
-        # the check there is important because this function may receive bytes
-        # that were downloaded from MinIO after a previous successful bake.
         paginated_bytes = _add_page_breaks(docx_bytes, page_texts)
         with tempfile.NamedTemporaryFile(suffix=".docx") as tmp:
             tmp.write(paginated_bytes)
