@@ -86,9 +86,12 @@ def _render_to_pdf(
 ) -> bytes:
     with tempfile.TemporaryDirectory(prefix="tdb-docx-paginate-") as tmp_dir:
         docx_path = os.path.join(tmp_dir, "input.docx")
-        with open(docx_path, "wb") as fh:
-            fh.write(docx_bytes)
-        # handle is now closed — soffice can read the file cleanly
+        try:
+            with open(docx_path, "wb") as fh:
+                fh.write(docx_bytes)
+            # handle is now closed — soffice can read the file cleanly
+        except Exception as exc:
+            logger.warning(f"docx page-break baking skipped.{exc}")
 
         profile_uri = f"file://{tmp_dir}/lo_profile"
 
