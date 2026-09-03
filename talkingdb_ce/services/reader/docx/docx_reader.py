@@ -230,10 +230,10 @@ class DocxReader:
         model.assign_ids(self.doc_uid)
         model.build_hierarchy()
 
+        new_file_hash = None
         if paginate and PAGINATE_DOCX_ENABLED:
-            paginate_docx(
+            new_file_hash = paginate_docx(
                 raw_docx_bytes, model, cancel_check=cancel_check,
                 channel=channel, file_hash=file_hash,
             )
-
-        return model
+        return model, new_file_hash

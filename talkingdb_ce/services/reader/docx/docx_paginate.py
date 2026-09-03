@@ -91,7 +91,7 @@ def _render_to_pdf(
                 fh.write(docx_bytes)
             # handle is now closed — soffice can read the file cleanly
         except Exception as exc:
-            logger.warning(f"docx page-break baking skipped.{exc}")
+            raise PaginationError(f"failed to write docx to temp file: {exc}") from exc
 
         profile_uri = f"file://{tmp_dir}/lo_profile"
 
@@ -281,7 +281,8 @@ def _append_break_before(ct_element) -> None:
         run.append(br)
         prev.append(run)
         return
-
+    if prev is None:
+        return  # first block in the body - nothing to break before
     new_p = OxmlElement("w:p")
     run = OxmlElement("w:r")
     br = OxmlElement("w:br")
@@ -299,39 +300,45 @@ def _add_page_breaks(docx_bytes: bytes, page_texts: list[str]) -> bytes:
         already_broken = _has_break_immediately_before(elem)
         needed = gap - 1 if already_broken else gap
         if needed <= 0:
-            continue  # LibreOffice's own break already accounts for this boundary
+            continue
 
-        # Each call re-checks elem.getprevious(), which after the first
-        # iteration is either the original preceding paragraph (now with
-        # one more break run) or a break-only paragraph this loop just
-        # inserted - either way, subsequent breaks attach there too, so a
-        # multi-page gap doesn't pile up extra empty paragraphs.
-        for _ in range(needed):
-            _append_break_before(elem)
+        if isinstance(elem, CT_P):
+            _set_page_break_before(elem, needed)
+        else:
+            for _ in range(needed):
+                _append_break_before(elem)
 
     out = io.BytesIO()
     doc.save(out)
     return out.getvalue()
 
+def _set_page_break_before(elem: CT_P, needed: int) -> None:
+    pPr = elem.find(qn("w:pPr"))
+    if pPr is None:
+        pPr = OxmlElement("w:pPr")
+        elem.insert(0, pPr)
+    if pPr.find(qn("w:pageBreakBefore")) is None:
+        pPr.append(OxmlElement("w:pageBreakBefore"))
+        needed -= 1
+    for _ in range(needed):
+        run = OxmlElement("w:r")
+        br = OxmlElement("w:br")
+        br.set(qn("w:type"), "page")
+        run.append(br)
+        elem.insert(0, run)
+
 
 def _bake_and_store_page_breaks(
-    docx_bytes: bytes,
-    page_texts: list[str],
-    channel: str,
-    file_hash: str,
-) -> None:
-    """Insert explicit page breaks at LibreOffice's page boundaries and
-    overwrite the already-uploaded docx object in MinIO with the result, at
-    the SAME (channel, file_hash) key the original upload used.
-    """
+    docx_bytes: bytes, page_texts: list[str], channel: str, file_hash: str,
+) -> Optional[str]:
     if not file_store.is_configured():
-        return
-
+        return None
     try:
         paginated_bytes = _add_page_breaks(docx_bytes, page_texts)
         with tempfile.NamedTemporaryFile(suffix=".docx") as tmp:
             tmp.write(paginated_bytes)
             tmp.flush()
-            file_store.overwrite_file(channel, file_hash, tmp.name)
+            return file_store.overwrite_file(channel, file_hash, tmp.name)
     except Exception as exc:
         logger.warning(f"docx page-break baking/storage skipped: {exc}")
+        return None
