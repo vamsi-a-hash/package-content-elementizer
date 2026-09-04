@@ -69,7 +69,7 @@ async def run_parse(
                 channel=channel, file_hash=file_hash,
             )
 
-        document = _parse_document()
+        document, new_file_hash = _parse_document()
         file_index = document.build_index()
 
         update_event(event, EventStatus.COMPLETED)
