@@ -62,7 +62,7 @@ async def run_parse(
         file_type = ext.lstrip(".").lower()
 
         channel = getattr(meta, "channel", None)
-        if channel is not CHANNEL_PATTERN.match(channel):
+        if not channel or not CHANNEL_PATTERN.match(channel):
             channel = None
         file_hash = hashlib.sha256(file_bytes).hexdigest()
 
