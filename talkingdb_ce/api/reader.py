@@ -1,5 +1,7 @@
 import os
 import io
+import re
+import hashlib
 from typing import Callable, Optional
 from fastapi import APIRouter, UploadFile, File, Form
 from talkingdb.models.metadata.metadata import Metadata, DEFAULT_METADATA
@@ -16,6 +18,7 @@ from talkingdb_ce.model.api.reader import RequestModel
 
 router = APIRouter(prefix="/content", tags=["Elementizer"])
 
+CHANNEL_PATTERN = re.compile(r"^(localhost|ttt-rc[1-9][0-9]*)$")
 
 async def run_parse(
     document_file: UploadFile,
@@ -59,7 +62,9 @@ async def run_parse(
         file_type = ext.lstrip(".").lower()
 
         channel = getattr(meta, "channel", None)
-        file_hash = getattr(meta, "file_hash", None)
+        if channel is not CHANNEL_PATTERN.match(channel):
+            channel = None
+        file_hash = hashlib.sha256(file_bytes).hexdigest()
 
         @track()
         def _parse_document():
