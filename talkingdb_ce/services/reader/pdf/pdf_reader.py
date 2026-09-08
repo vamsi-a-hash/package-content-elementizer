@@ -71,7 +71,7 @@ class PdfReader:
             io_buffer, cancel_check=cancel_check, checkpoint_dir=checkpoint_dir
         )
 
-        model = self.docx_reader.read_document(
+        model, _ = self.docx_reader.read_document(
             io.BytesIO(docx_bytes), file_name, paginate=False)
 
         self._reject_if_textless(model, file_name)
