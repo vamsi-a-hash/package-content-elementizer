@@ -2,7 +2,7 @@ from typing import Callable, List, Optional
 import copy
 
 from docx import Document
-from docx.enum.section import WD_ORIENT
+from docx.enum.section import WD_ORIENT, WD_SECTION_START
 from docx.text.paragraph import Paragraph
 from docx.table import Table
 
@@ -17,6 +17,12 @@ from talkingdb.models.document.elements.primitive.paragraph import ParagraphMode
 from talkingdb.models.document.elements.primitive.table import TableModel, TableCellModel
 
 from .docx_paginate import paginate_docx, PAGINATE_DOCX_ENABLED
+
+_PAGE_BREAK_TYPES = (
+    WD_SECTION_START.NEW_PAGE,
+    WD_SECTION_START.EVEN_PAGE,
+    WD_SECTION_START.ODD_PAGE,
+)
 
 
 class DocxReader:
@@ -207,6 +213,8 @@ class DocxReader:
 
                 if sectPr is not None:
                     section_idx += 1
+                    if sectPr.start_type not in _PAGE_BREAK_TYPES:
+                        continue
                     layout = new_layout(doc.sections[section_idx], prev_layout=layout)
                     model.layouts.append(layout)
                     continue

@@ -2,6 +2,7 @@ FROM python:3.13-slim-bookworm
 
 RUN apt-get update && apt-get install -y curl 
 RUN apt-get install -y --no-install-recommends libreoffice-writer \
+    fonts-crosextra-carlito fonts-crosextra-caladea fonts-liberation2 \
     && rm -rf /var/lib/apt/lists/*
 RUN curl -sSL https://install.python-poetry.org | python3 -
 
